@@ -40,6 +40,17 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	const maxMemory = 10 << 20
 	r.ParseMultipartForm(maxMemory)
 
+	video, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "Couldn't find video", err)
+		return
+	}
+
+	if video.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "Unauthorized", err)
+		return
+	}
+
 	// "thumbnail" should match the HTML form input name
 	file, header, err := r.FormFile("thumbnail")
 	if err != nil {
@@ -55,17 +66,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	if mediaType != "image/png" && mediaType != "image/jpeg" {
 		respondWithError(w, http.StatusBadRequest, "Unsupported file type", nil)
-		return
-	}
-
-	video, err := cfg.db.GetVideo(videoID)
-	if err != nil {
-		respondWithError(w, http.StatusNotFound, "Couldn't find video", err)
-		return
-	}
-
-	if video.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "Unauthorized", err)
 		return
 	}
 
@@ -93,7 +93,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	thumbnailURL := fmt.Sprintf("http://localhost:%s/assets/%s.%s", cfg.port, fileName, fileExtension)
 	video.ThumbnailURL = &thumbnailURL
-
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to update video", err)
