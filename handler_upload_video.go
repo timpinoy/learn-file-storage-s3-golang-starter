@@ -3,17 +3,58 @@ package main
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
 )
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	fmt.Println(filePath)
+	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	type Stream struct {
+		Width  int `json:"width"`
+		Height int `json:"height"`
+	}
+
+	type Streams struct {
+		Streams []Stream `json:"streams"`
+	}
+
+	var streams Streams
+	err = json.Unmarshal(output, &streams)
+	if err != nil {
+		return "", err
+	}
+
+	if len(streams.Streams) == 0 {
+		return "", fmt.Errorf("no streams found")
+	}
+
+	width := streams.Streams[0].Width
+	height := streams.Streams[0].Height
+
+	if width/16 == height/9 {
+		return "16:9", nil
+	} else if width/9 == height/16 {
+		return "9:16", nil
+	} else {
+		return "other", nil
+	}
+}
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 	videoIDString := r.PathValue("videoID")
@@ -94,9 +135,23 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 	fileName := base64.RawURLEncoding.EncodeToString(randBytes) + ".mp4"
 
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		fmt.Println(err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't get video aspect ratio", err)
+		return
+	}
+
+	prefix := aspectRatio
+	if prefix == "16:9" {
+		prefix = "landscape"
+	} else if prefix == "9:16" {
+		prefix = "portrait"
+	}
+
 	PutObjectInput := &s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
-		Key:         aws.String(fileName),
+		Key:         aws.String(fmt.Sprintf("%s/%s", prefix, fileName)),
 		Body:        tempFile,
 		ContentType: aws.String(mediaType),
 	}
@@ -106,7 +161,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	videoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, fileName)
+	videoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s/%s", cfg.s3Bucket, cfg.s3Region, prefix, fileName)
 	video.VideoURL = &videoURL
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
