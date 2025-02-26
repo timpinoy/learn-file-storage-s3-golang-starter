@@ -18,7 +18,6 @@ import (
 )
 
 func getVideoAspectRatio(filePath string) (string, error) {
-	fmt.Println(filePath)
 	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
 	output, err := cmd.Output()
 	if err != nil {
@@ -56,6 +55,17 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	}
 }
 
+func processVideoForFastStart(filePath string) (string, error) {
+	returnFilePath := filePath + ".processing"
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", returnFilePath)
+	err := cmd.Run()
+	if err != nil {
+		return "", err
+	}
+
+	return returnFilePath, nil
+}
+
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
 	videoIDString := r.PathValue("videoID")
 	videoID, err := uuid.Parse(videoIDString)
@@ -75,8 +85,6 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT", err)
 		return
 	}
-
-	fmt.Println("uploading video", videoID, "by user", userID)
 
 	const maxMemory = 10 << 30
 	r.ParseMultipartForm(maxMemory)
@@ -127,6 +135,22 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	tempFile.Seek(0, io.SeekStart)
 
+	processedFilePath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't process video", err)
+		return
+	}
+
+	processedFile, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't open processed file", err)
+		return
+	}
+	defer func() {
+		processedFile.Close()
+		os.Remove(processedFile.Name())
+	}()
+
 	randBytes := make([]byte, 32)
 	_, err = rand.Read(randBytes)
 	if err != nil {
@@ -137,7 +161,6 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 
 	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
 	if err != nil {
-		fmt.Println(err)
 		respondWithError(w, http.StatusInternalServerError, "Couldn't get video aspect ratio", err)
 		return
 	}
@@ -152,7 +175,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	PutObjectInput := &s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
 		Key:         aws.String(fmt.Sprintf("%s/%s", prefix, fileName)),
-		Body:        tempFile,
+		Body:        processedFile,
 		ContentType: aws.String(mediaType),
 	}
 	_, err = cfg.s3Client.PutObject(r.Context(), PutObjectInput)
